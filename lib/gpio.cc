@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/param.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -58,12 +60,14 @@
 // Raspberry 1 and 2 have different base addresses for the periphery
 #define BCM2708_PERI_BASE        0x20000000
 #define BCM2709_PERI_BASE        0x3F000000
+#define BCM2837_PERI_BASE        0x3F000000
+#define RK3288_PERI_BASE         0xff750000
 
 #define GPIO_REGISTER_OFFSET         0x200000
 #define COUNTER_1Mhz_REGISTER_OFFSET   0x3000
 
-#define GPIO_PWM_BASE_OFFSET	(GPIO_REGISTER_OFFSET + 0xC000)
-#define GPIO_CLK_BASE_OFFSET	0x101000
+#define GPIO_PWM_BASE_OFFSET  (GPIO_REGISTER_OFFSET + 0xC000)
+#define GPIO_CLK_BASE_OFFSET  0x101000
 
 #define REGISTER_BLOCK_SIZE (4*1024)
 
@@ -72,12 +76,12 @@
 #define PWM_RNG1     (0x10 / 4)
 #define PWM_FIFO     (0x18 / 4)
 
-#define PWM_CTL_CLRF1 (1<<6)	// CH1 Clear Fifo (1 Clears FIFO 0 has no effect)
-#define PWM_CTL_USEF1 (1<<5)	// CH1 Use Fifo (0=data reg transmit 1=Fifo used for transmission)
-#define PWM_CTL_POLA1 (1<<4)	// CH1 Polarity (0=(0=low 1=high) 1=(1=low 0=high)
-#define PWM_CTL_SBIT1 (1<<3)	// CH1 Silence Bit (state of output when 0 transmission takes place)
-#define PWM_CTL_MODE1 (1<<1)	// CH1 Mode (0=pwm 1=serialiser mode)
-#define PWM_CTL_PWEN1 (1<<0)	// CH1 Enable (0=disable 1=enable)
+#define PWM_CTL_CLRF1 (1<<6)  // CH1 Clear Fifo (1 Clears FIFO 0 has no effect)
+#define PWM_CTL_USEF1 (1<<5)  // CH1 Use Fifo (0=data reg transmit 1=Fifo used for transmission)
+#define PWM_CTL_POLA1 (1<<4)  // CH1 Polarity (0=(0=low 1=high) 1=(1=low 0=high)
+#define PWM_CTL_SBIT1 (1<<3)  // CH1 Silence Bit (state of output when 0 transmission takes place)
+#define PWM_CTL_MODE1 (1<<1)  // CH1 Mode (0=pwm 1=serialiser mode)
+#define PWM_CTL_PWEN1 (1<<0)  // CH1 Enable (0=disable 1=enable)
 
 #define PWM_STA_EMPT1 (1<<1)
 #define PWM_STA_FULL1 (1<<0)
@@ -169,8 +173,18 @@ static bool IsRaspberryPi2() {
   return false;
 }
 
-static uint32_t *mmap_bcm_register(bool isRPi2, off_t register_offset) {
-  const off_t base = (isRPi2 ? BCM2709_PERI_BASE : BCM2708_PERI_BASE);
+static bool IsTinkerBoard() {
+  size_t TBSize = 0x7d74c000;
+  size_t realSize = (size_t)sysconf( _SC_PHYS_PAGES ) * (size_t)sysconf( _SC_PAGESIZE );
+  if (realSize == TBSize){
+    return true;
+  } else {
+    return false;
+  }
+}
+
+static uint32_t *mmap_bcm_register(bool isRPi2, bool isTB, off_t register_offset) {
+  const off_t base = (isRPi2 ? BCM2709_PERI_BASE : (isTB ? RK3288_PERI_BASE : BCM2708_PERI_BASE));
 
   int mem_fd;
   if ((mem_fd = open("/dev/mem", O_RDWR|O_SYNC) ) < 0) {
@@ -198,7 +212,7 @@ static uint32_t *mmap_bcm_register(bool isRPi2, off_t register_offset) {
 // Based on code example found in http://elinux.org/RPi_Low-level_peripherals
 bool GPIO::Init(int slowdown) {
   slowdown_ = slowdown;
-  gpio_port_ = mmap_bcm_register(IsRaspberryPi2(), GPIO_REGISTER_OFFSET);
+  gpio_port_ = mmap_bcm_register(IsRaspberryPi2(), IsTinkerBoard(), GPIO_REGISTER_OFFSET);
   if (gpio_port_ == NULL) {
     return false;
   }
@@ -281,7 +295,8 @@ static void DisableRealtimeThrottling() {
 
 bool Timers::Init() {
   const bool isRPi2 = IsRaspberryPi2();
-  uint32_t *timereg = mmap_bcm_register(isRPi2, COUNTER_1Mhz_REGISTER_OFFSET);
+  const bool isTB = IsTinkerBoard();
+  uint32_t *timereg = mmap_bcm_register(isRPi2, isTB, COUNTER_1Mhz_REGISTER_OFFSET);
   if (timereg == NULL) {
     return false;
   }
@@ -382,10 +397,10 @@ public:
       fprintf(stderr,
               "\n%s=== snd_bcm2835: found that the Pi sound module is loaded. ===%s\n"
               "Don't use the built-in sound of the Pi together with this lib; it is known to be\n"
-	      "incompatible and cause trouble and hangs (you can still use external USB sound adapters).\n\n"
+        "incompatible and cause trouble and hangs (you can still use external USB sound adapters).\n\n"
               "See Troubleshooting section in README how to disable the sound module.\n"
-	      "You can also run with --led-no-hardware-pulse to avoid the incompatibility,\n"
-	      "but you will have more flicker.\n"
+        "You can also run with --led-no-hardware-pulse to avoid the incompatibility,\n"
+        "but you will have more flicker.\n"
               "Exiting; fix the above first or use --led-no-hardware-pulse\n\n",
               "\033[1;31m", "\033[0m");
       exit(1);
@@ -399,9 +414,10 @@ public:
     const int base = specs[0];
     // Get relevant registers
     const bool isPI2 = IsRaspberryPi2();
-    volatile uint32_t *gpioReg = mmap_bcm_register(isPI2, GPIO_REGISTER_OFFSET);
-    pwm_reg_  = mmap_bcm_register(isPI2, GPIO_PWM_BASE_OFFSET);
-    clk_reg_  = mmap_bcm_register(isPI2, GPIO_CLK_BASE_OFFSET);
+    const bool isTB = IsTinkerBoard();
+    volatile uint32_t *gpioReg = mmap_bcm_register(isPI2, isTB, GPIO_REGISTER_OFFSET);
+    pwm_reg_  = mmap_bcm_register(isPI2, isTB, GPIO_PWM_BASE_OFFSET);
+    clk_reg_  = mmap_bcm_register(isPI2, isTB, GPIO_CLK_BASE_OFFSET);
     fifo_ = pwm_reg_ + PWM_FIFO;
     assert((clk_reg_ != NULL) && (pwm_reg_ != NULL));  // init error.
 
